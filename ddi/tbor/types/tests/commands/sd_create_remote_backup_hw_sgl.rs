@@ -3,11 +3,11 @@
 
 //! HW-only OOB SGL transport smoke test for `SdCreateRemoteBackup`.
 //!
-//! Purpose: prove that the SDK Linux backend's
-//! `AZIHSM_CTRL_PATH_DATA_XFER` path reaches the firmware CreateSD FSM
-//! and preserves the selected OOB payload bytes through the driver's
-//! metadata-page and SGL-page representation. The firmware returns a
-//! test-only length/checksum/index/descriptor-count integrity marker.
+//! Purpose: prove that the SDK native backend's data-transfer IOCTL
+//! path reaches the firmware CreateSD FSM and preserves the selected
+//! OOB payload bytes through the driver's metadata-page and SGL-page
+//! representation. The firmware returns a test-only
+//! length/checksum/index/descriptor-count integrity marker.
 //!
 //! This is intentionally NOT a full-fidelity CreateSD test.  It
 //! deliberately skips the whole provisioning stack — no `PartFinal`,
@@ -23,12 +23,10 @@
 //! payload Data Blocks, then returns the integrity marker without
 //! running HPKE-Auth seal. This isolates OOB transport bring-up.
 //!
-//! Gated to the native Linux backend via the module-level `cfg`
-//! (no `emu` / `mock` / `sock` feature).  When the crate is compiled
-//! without any fake-backend feature the test binary picks this test
-//! up as an ordinary integration test — no `--ignored` needed.  If
-//! any of `emu` / `mock` / `sock` is enabled the whole module
-//! compiles out.
+//! Gated to native hardware backends via the module-level `cfg`
+//! (no `emu` / `mock` / `sock` feature). When the crate is compiled
+//! without a fake-backend feature, the test binary picks this test up
+//! as an ordinary integration test — no `--ignored` needed.
 //!
 //! Run with:
 //! ```text
@@ -37,12 +35,7 @@
 //!     sd_create_remote_backup_oob_transport_smoke --nocapture
 //! ```
 
-#![cfg(all(
-    target_os = "linux",
-    not(feature = "emu"),
-    not(feature = "mock"),
-    not(feature = "sock")
-))]
+#![cfg(all(not(feature = "emu"), not(feature = "mock"), not(feature = "sock")))]
 
 use azihsm_ddi_tbor_types::tbor_int::U16;
 use azihsm_ddi_tbor_types::PartPolicy;
