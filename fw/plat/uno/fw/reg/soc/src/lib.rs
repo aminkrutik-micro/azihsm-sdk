@@ -27,6 +27,7 @@ mod access {
 
 pub use access::*;
 pub mod aes;
+pub mod debug_log;
 pub mod dual_cp_m7;
 pub mod gdma;
 pub mod hsm_dtcm;
@@ -39,6 +40,7 @@ pub mod part_store_t;
 pub mod psram;
 pub mod rng;
 pub mod sha;
+pub mod sys_mbx;
 pub mod tcon;
 pub mod trace_mailbox;
 pub mod uart;

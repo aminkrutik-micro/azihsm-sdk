@@ -61,23 +61,36 @@ mod decode;
 use core::arch::global_asm;
 
 use azihsm_fw_hsm_core_tracing::error;
+#[cfg(not(feature = "semihosting"))]
+use azihsm_fw_static_ref::StaticRef;
 use azihsm_fw_uno_crashdump::crash_format::CpuRegisterContext;
 use azihsm_fw_uno_crashdump::crashdump_save;
+use azihsm_fw_uno_crashdump::crashdump_save_fmt;
 use azihsm_fw_uno_crashdump::failure_code::FailureCode;
 use azihsm_fw_uno_drivers_nvic::Nvic;
 use azihsm_fw_uno_drivers_tcon::Tcon;
-// `HsmError` is referenced only inside `error!`, which compiles out when no
-// trace level is enabled (production); the import is then unused.
-#[allow(unused_imports)]
 use azihsm_fw_uno_error::HsmError;
 use azihsm_fw_uno_pac::Interrupt;
 use azihsm_fw_uno_reg_cortex_m::scb::regs::ScbRegs;
 use azihsm_fw_uno_reg_cortex_m::scb::CFSR;
 use azihsm_fw_uno_reg_cortex_m::scb::HFSR;
 use azihsm_fw_uno_reg_cortex_m::scb::SCB_BASE;
+#[cfg(not(feature = "semihosting"))]
+use azihsm_fw_uno_reg_soc::sys_mbx::regs::SysMbxRegs;
+#[cfg(not(feature = "semihosting"))]
+use azihsm_fw_uno_reg_soc::sys_mbx::S2H_MBX_INSTS;
+#[cfg(not(feature = "semihosting"))]
+use azihsm_fw_uno_reg_soc::sys_mbx::SYS_MBX_BASE;
 use cortex_m_rt::exception;
 use cortex_m_rt::ExceptionFrame;
+#[cfg(not(feature = "semihosting"))]
+use tock_registers::interfaces::ReadWriteable;
 use tock_registers::interfaces::Readable;
+
+/// Mailbox0, observed by the SP for FIPS error-state signaling.
+#[cfg(not(feature = "semihosting"))]
+// SAFETY: SYS_MBX_BASE is the fixed, mapped Mailbox0 register block.
+const SYS_MBX: StaticRef<SysMbxRegs> = unsafe { StaticRef::new(SYS_MBX_BASE as *const SysMbxRegs) };
 
 /// Borrow the System Control Block MMIO register block.
 ///
@@ -103,6 +116,33 @@ fn halt() -> ! {
     loop {
         cortex_m::asm::nop();
     }
+}
+
+/// Sets the SP Mailbox0 error bit and halts in the FIPS error state.
+///
+/// Emulator builds exit via semihosting without accessing the silicon mailbox.
+#[allow(unused_variables)]
+pub fn enter_error_state(reason: HsmError) -> ! {
+    error!("fips", reason, "#### FIPS error state ####");
+    #[cfg(not(feature = "semihosting"))]
+    SYS_MBX.s2h_mbx_insts.modify(S2H_MBX_INSTS::ERR_BIT::SET);
+    halt();
+}
+
+/// Records the failed periodic self-test, notifies the peer, and enters the
+/// FIPS error state. The dump tail preserves the test and engine identifiers.
+pub fn enter_self_test_error_state(test: u32, engine: u32, reason: HsmError) -> ! {
+    Nvic::disable(Interrupt::TCON_WAKEUP1);
+    crashdump_save_fmt(
+        &capture_register_context(),
+        FailureCode::ExplicitFailure,
+        format_args!(
+            "Self-test {test}, engine {engine}, error {:#x}",
+            u32::from(reason)
+        ),
+    );
+    Tcon::fire_wakeup_timer1();
+    enter_error_state(reason)
 }
 
 /// Capture the calling core's `sp` and `pc` for a crash dump.

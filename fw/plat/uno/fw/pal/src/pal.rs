@@ -38,6 +38,7 @@ use azihsm_fw_hsm_pal_traits::HsmPal;
 use azihsm_fw_hsm_pal_traits::HsmPartId;
 use azihsm_fw_hsm_pal_traits::HsmResult;
 use azihsm_fw_static_init::static_init;
+use azihsm_fw_uno_debug_log::DebugLogSender;
 use azihsm_fw_uno_drivers_aes::AesDriver;
 use azihsm_fw_uno_drivers_boot_status as boot_status;
 use azihsm_fw_uno_drivers_boot_status::BootStatus;
@@ -519,6 +520,14 @@ impl UnoHsmPal {
         core_status::set(CoreStatus::Alive);
     }
 
+    /// Runs the periodic cryptographic self-tests forever (one test per interval).
+    ///
+    /// Must only be started once the PAL is in [`BootPhase::Running`], after
+    /// the pre-operational suite has passed. Never returns.
+    pub async fn run_periodic_self_tests(&self) -> ! {
+        crate::self_test::run_periodic(self).await
+    }
+
     /// Validate and acknowledge an expected boot state-change message.
     ///
     /// # Parameters
@@ -656,6 +665,20 @@ impl UnoHsmPal {
                 if !self.try_ack_state_change(buf, IoProcessorState::Start, "WaitStart") {
                     return;
                 }
+                // Pre-operational self-test gate (FIPS): the in-scope algorithm
+                // KATs must pass before the HSM exposes any crypto. Crypto
+                // engines are construct-ready (AES/SHA/PKA need no boot-time
+                // init), so this runs before `on_boot_complete`. On failure we
+                // withhold the transition — the PAL never reaches `Running`,
+                // never publishes `BootStatus::Run`. As in the reference
+                // firmware (`HsmEnv::new` -> `preops_cast`), a failure panics;
+                // the panic handler is the fail-stop path.
+                let io = crate::io::UnoHsmIo::self_test();
+                if let Err(_e) = crate::self_test::run_pre_op(self, &io).await {
+                    error!("selftest", _e, "pre-operational self-test FAILED");
+                    panic!("pre-operational self-test failed");
+                }
+                info!("selftest", "pre-operational self-test PASSED");
                 self.on_boot_complete()
             }
             BootPhase::Running => {
@@ -810,7 +833,8 @@ impl UnoHsmPal {
 impl HsmCustomDispatch for UnoHsmPal {
     #[cfg(any(feature = "azihsm_test_hooks", feature = "fips_validation_hooks"))]
     async fn mbor_dispatch(&self, io: &impl HsmIo, req: &mut DmaBuf) -> HsmResult<&DmaBuf> {
-        crate::test_hooks::mbor_dispatch(self, io, req).await
+        let future = core::pin::pin!(crate::test_hooks::mbor_dispatch(self, io, req));
+        crate::test_hooks::Outlined(future).await
     }
 
     #[cfg(not(any(feature = "azihsm_test_hooks", feature = "fips_validation_hooks")))]
@@ -832,9 +856,10 @@ impl HsmPal for UnoHsmPal {
     /// Initialises the Uno platform (phase 1 only).
     ///
     /// Sets up the minimum needed for IPC communication:
-    /// 1. SysTick (Embassy time driver) — needed for async timers
-    /// 2. RNG calibration — settling delay for IPC
-    /// 3. IPC init + enable — Admin communication channel
+    /// 1. Debug log ring — first, so later steps can log
+    /// 2. SysTick (Embassy time driver) — needed for async timers
+    /// 3. RNG calibration — settling delay for IPC
+    /// 4. IPC init + enable — Admin communication channel
     ///
     /// IO hardware (IIC/OIC/GDMA) is deferred until the boot handshake
     /// completes (PAL transitions to [`BootPhase::Running`]).
@@ -846,10 +871,16 @@ impl HsmPal for UnoHsmPal {
     /// Returns `()`.
     ///
     /// # Side Effects
+    /// - Initializes the GSRAM debug log ring.
     /// - Initializes SysTick timing and RNG.
     /// - Initializes IPC and enables message/event channels.
     /// - Publishes boot status `Done` for host-side polling.
     fn init(&self) {
+        // First, so every later init step can log. The ring lives in
+        // GSRAM and the SP drains it, making this the only logging path
+        // observable on a blade.
+        DebugLogSender::init();
+
         systick_driver::init();
         self.rng.init();
         self.ipc.init();
