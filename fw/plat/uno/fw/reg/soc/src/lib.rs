@@ -27,7 +27,6 @@ mod access {
 
 pub use access::*;
 pub mod aes;
-pub mod debug_log;
 pub mod dual_cp_m7;
 pub mod gdma;
 pub mod hsm_dtcm;

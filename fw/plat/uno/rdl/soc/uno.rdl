@@ -9,7 +9,6 @@
 //     0x2003_B400  DEV_ID_CERT_BLOB (16 KB)
 //     0x2003_F400  CRASHDUMP_BASE (1 KB) + CORE_RUN_STATUS
 //   0x6100_0000  SRAM              2 MB  (GSRAM: queues, DMA, key vault)
-//   0x6100_27F8  DEBUG_LOG      2056 B  (CP1 debug log ring; drained by SP)
 //   0xA3E0_0000  PSRAM            32 KB  (persistent; IPC rings + reset reason)
 //   0x4000_2000  TraceMailbox      4 KB  (debug-only)
 //   0xA000_0000  GDMA              4 KB
@@ -42,7 +41,6 @@
 `include "dual_cp_m7.rdl"
 `include "uart.rdl"
 `include "gsram_map.rdl"
-`include "debug_log.rdl"
 `include "dtcm_map.rdl"
 `include "psram_map.rdl"
 
@@ -74,9 +72,6 @@ addrmap uno {
 
     // GSRAM — all queues, buffers, stores, vault
     io_gsram IO_GSRAM       @ 0x6100_0000;
-    // CP1 debug log ring in a GSRAM gap; SP collects it.
-    debug_log DEBUG_LOG     @ 0x6100_27F8;
-
     // PSRAM — HSM↔backend IPC rings and persistent reset-reason word
     psram    PSRAM           @ 0xA3E0_0000;
 

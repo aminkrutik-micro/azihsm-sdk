@@ -16,13 +16,11 @@
 //!
 //! Diagnostics are emitted through `azihsm_fw_hsm_core_tracing` (`error!`),
 //! the same facade the rest of the firmware uses, rather than a bespoke
-//! sink. This keeps faults on one logging path: they share the backend,
-//! formatting, and (future) debug-log/token routing as every other trace.
+//! sink. This keeps faults on one logging path: they share the backend
+//! and formatting with every other trace.
 //! As with all tracing, the messages are present only when a trace level is
 //! enabled in the final image (e.g. the `trace-uart` bring-up build); a
-//! trace-disabled production build emits nothing here until an always-on
-//! logging backend (HSP debug-log) is brought up — at which point faults
-//! gain it uniformly with the rest of the firmware.
+//! trace-disabled production build emits nothing here.
 //!
 //! Each handler logs at error level with an exception-specific `HsmError`
 //! code — [`HsmError::Panic`], [`HsmError::HardFault`],

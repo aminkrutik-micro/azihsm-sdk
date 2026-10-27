@@ -34,10 +34,6 @@ mod vectors;
 
 use azihsm_fw_hsm_pal_traits::HsmError;
 use azihsm_fw_hsm_pal_traits::HsmResult;
-use azihsm_fw_uno_debug_log::DebugLogEntry;
-use azihsm_fw_uno_debug_log::DebugLogSender;
-use azihsm_fw_uno_debug_log::DebugLogSeverity as Severity;
-use azihsm_fw_uno_debug_log::msg::self_test as msg;
 use embassy_time::Duration;
 use embassy_time::Timer;
 use embassy_time::with_timeout;
@@ -64,10 +60,7 @@ async fn admin_rng_request(pal: &UnoHsmPal, op: IpcMessageOpCode, drained: bool)
             .send(IpcChannel::AdminRequest as u8, &req, &mut resp),
     )
     .await
-    .map_err(|_| {
-        log(Severity::Error, msg::RNG_IPC_TIMEOUT, op as u32, 0);
-        HsmError::CryptoTimeout
-    })?;
+    .map_err(|_| HsmError::CryptoTimeout)?;
     response_status(&resp, op, drained).map_err(|_| HsmError::IpcResponseDecodeError)
 }
 
@@ -84,15 +77,8 @@ async fn run_rng_periodic(pal: &UnoHsmPal) -> HsmResult<()> {
 
     let prepare = admin_rng_request(pal, IpcMessageOpCode::RngSelfTestPrepare, false).await?;
     if prepare != ok {
-        log(
-            Severity::Error,
-            msg::RNG_ADMIN_REJECTED,
-            prepare,
-            IpcMessageOpCode::RngSelfTestPrepare as u32,
-        );
         return Err(HsmError::IpcResponseFailure);
     }
-    log(Severity::Info, msg::RNG_PREPARE_ACCEPTED, prepare, 0);
 
     with_timeout(Duration::from_millis(RNG_DRAIN_TIMEOUT_MS), async {
         let mut pause_acknowledged = false;
@@ -107,41 +93,19 @@ async fn run_rng_periodic(pal: &UnoHsmPal) -> HsmResult<()> {
                 pause_acknowledged = true;
             }
             if status != pending && status != ok {
-                log(
-                    Severity::Error,
-                    msg::RNG_ADMIN_REJECTED,
-                    status,
-                    IpcMessageOpCode::RngSelfTestStatus as u32,
-                );
                 return Err(HsmError::IpcResponseFailure);
             }
             Timer::after(Duration::from_millis(RNG_STATUS_POLL_MS)).await;
         }
     })
     .await
-    .map_err(|_| {
-        log(
-            Severity::Error,
-            msg::RNG_IPC_TIMEOUT,
-            IpcMessageOpCode::RngSelfTestStatus as u32,
-            1,
-        );
-        HsmError::CryptoTimeout
-    })??;
-    log(Severity::Info, msg::RNG_ADMIN_READY, ok, 0);
+    .map_err(|_| HsmError::CryptoTimeout)??;
 
     pal.rng.self_test()?;
     let done = admin_rng_request(pal, IpcMessageOpCode::RngSelfTestDone, false).await?;
     if done != ok {
-        log(
-            Severity::Error,
-            msg::RNG_ADMIN_REJECTED,
-            done,
-            IpcMessageOpCode::RngSelfTestDone as u32,
-        );
         return Err(HsmError::IpcResponseFailure);
     }
-    log(Severity::Info, msg::RNG_ADMIN_DONE, done, 0);
     Ok(())
 }
 
@@ -195,19 +159,19 @@ const RNG_STATUS_POLL_MS: u64 = 20;
 const PERIODIC_INTERVAL_SECS: u64 = 60;
 
 impl SelfTest {
-    /// Returns `(test kind, engine)` as logged in the debug ring.
+    /// Returns `(test kind, engine)` for periodic failure attribution.
     fn id(self) -> (u32, u32) {
         match self {
-            Self::AesCbc => (msg::TEST_AES_CBC, 0),
-            Self::AesEcb => (msg::TEST_AES_ECB, 0),
-            Self::AesKwp => (msg::TEST_AES_KWP, 0),
-            Self::Hkdf => (msg::TEST_HKDF, 0),
-            Self::Kbkdf => (msg::TEST_KBKDF, 0),
-            Self::RsaModExp(e) => (msg::TEST_RSA_MOD_EXP, e as u32),
-            Self::RsaModExpCrt(e) => (msg::TEST_RSA_MOD_EXP_CRT, e as u32),
-            Self::Ecdh(e) => (msg::TEST_ECDH, e as u32),
-            Self::Ecdsa(e) => (msg::TEST_ECDSA, e as u32),
-            Self::Rng => (msg::TEST_RNG, 0),
+            Self::AesCbc => (1, 0),
+            Self::AesEcb => (2, 0),
+            Self::AesKwp => (3, 0),
+            Self::Hkdf => (4, 0),
+            Self::Kbkdf => (5, 0),
+            Self::RsaModExp(e) => (6, e as u32),
+            Self::RsaModExpCrt(e) => (7, e as u32),
+            Self::Ecdh(e) => (8, e as u32),
+            Self::Ecdsa(e) => (9, e as u32),
+            Self::Rng => (10, 0),
         }
     }
 
@@ -250,52 +214,16 @@ fn periodic_test(index: usize) -> SelfTest {
     }
 }
 
-fn log(severity: Severity, index: u8, arg1: u32, arg2: u32) {
-    DebugLogSender::send(DebugLogEntry::new(severity, index, arg1, arg2));
-}
-
-/// Packs the failing test into one log argument: kind in the low byte, engine above it.
-fn fail_arg(test: SelfTest) -> u32 {
-    let (kind, engine) = test.id();
-    kind | (engine << 8)
-}
-
 /// Reports a failed periodic self-test, like the reference firmware's
 /// `notify_self_test_failure` (periodic failures only; a pre-operational
 /// failure is propagated as `Err` and the boot gate panics, as in the
 /// reference `HsmEnv::new`).
 ///
-/// Records the failed test, saves an attributed crash dump, notifies the
-/// peer and enters the FIPS error state through Mailbox0.
+/// Saves an attributed crash dump, notifies the peer and enters the FIPS
+/// error state through Mailbox0.
 fn notify_self_test_failure(test: SelfTest, err: HsmError) -> ! {
     let (kind, engine) = test.id();
-    log(
-        Severity::Error,
-        msg::PERIODIC_FAIL,
-        fail_arg(test),
-        u32::from(err),
-    );
     azihsm_fw_uno_fault::enter_self_test_error_state(kind, engine, err)
-}
-
-/// Runs one pre-operational test and records its outcome in the debug log.
-async fn run_pre_op_test(pal: &UnoHsmPal, io: &UnoHsmIo, test: SelfTest) -> HsmResult<()> {
-    let (kind, engine) = test.id();
-    match test.run(pal, io).await {
-        Ok(()) => {
-            log(Severity::Info, msg::PREOP_TEST_PASS, kind, engine);
-            Ok(())
-        }
-        Err(e) => {
-            log(
-                Severity::Error,
-                msg::PREOP_FAIL,
-                fail_arg(test),
-                u32::from(e),
-            );
-            Err(e)
-        }
-    }
 }
 
 /// Runs the full pre-operational self-test suite.
@@ -304,27 +232,25 @@ async fn run_pre_op_test(pal: &UnoHsmPal, io: &UnoHsmIo, test: SelfTest) -> HsmR
 /// as the reference firmware does when `preops_cast` fails. Mirrors
 /// the reference firmware's `preops_cast` — positive known-answer tests only.
 pub(crate) async fn run_pre_op(pal: &UnoHsmPal, io: &UnoHsmIo) -> HsmResult<()> {
-    log(Severity::Info, msg::PREOP_START, 0, 0);
     for test in FIXED_TESTS {
-        run_pre_op_test(pal, io, test).await?;
+        test.run(pal, io).await?;
     }
     for engine in 0..pka::PKA_ENGINES {
-        run_pre_op_test(pal, io, SelfTest::RsaModExp(engine)).await?;
+        SelfTest::RsaModExp(engine).run(pal, io).await?;
     }
     for engine in 0..pka::PKA_ENGINES {
-        run_pre_op_test(pal, io, SelfTest::RsaModExpCrt(engine)).await?;
+        SelfTest::RsaModExpCrt(engine).run(pal, io).await?;
     }
     for engine in 0..pka::PKA_ENGINES {
-        run_pre_op_test(pal, io, SelfTest::Ecdh(engine)).await?;
+        SelfTest::Ecdh(engine).run(pal, io).await?;
     }
     for engine in 0..pka::PKA_ENGINES {
-        run_pre_op_test(pal, io, SelfTest::Ecdsa(engine)).await?;
+        SelfTest::Ecdsa(engine).run(pal, io).await?;
     }
     // The DRBG FW-mode KAT is state-destructive; it saves and restores the
     // production DRBG registers internally. Run it last (matching the reference
     // `preops_cast` ordering) and before any live RNG consumer exists.
-    run_pre_op_test(pal, io, SelfTest::Rng).await?;
-    log(Severity::Info, msg::PREOP_PASS, 0, 0);
+    SelfTest::Rng.run(pal, io).await?;
     Ok(())
 }
 
@@ -337,14 +263,11 @@ pub(crate) async fn run_pre_op(pal: &UnoHsmPal, io: &UnoHsmIo) -> HsmResult<()> 
 pub(crate) async fn run_periodic(pal: &UnoHsmPal) -> ! {
     let io = UnoHsmIo::self_test();
     let mut index = 0;
-    let mut cycles = 0u32;
 
     loop {
         Timer::after(Duration::from_secs(PERIODIC_INTERVAL_SECS)).await;
 
         let test = periodic_test(index);
-        let (kind, engine) = test.id();
-        log(Severity::Info, msg::PERIODIC_START, kind, engine);
         let result = match test {
             SelfTest::Rng => run_rng_periodic(pal).await,
             _ => match with_timeout(Duration::from_secs(1), test.run(pal, &io)).await {
@@ -352,18 +275,13 @@ pub(crate) async fn run_periodic(pal: &UnoHsmPal) -> ! {
                 Err(_) => Err(HsmError::CryptoTimeout),
             },
         };
-        match result {
-            Ok(()) => log(Severity::Info, msg::PERIODIC_PASS, kind, engine),
-            Err(e) => {
-                notify_self_test_failure(test, e);
-            }
+        if let Err(e) = result {
+            notify_self_test_failure(test, e);
         }
 
         index += 1;
         if index == PERIODIC_TEST_COUNT {
             index = 0;
-            cycles = cycles.wrapping_add(1);
-            log(Severity::Info, msg::PERIODIC_CYCLE_DONE, cycles, 0);
         }
     }
 }

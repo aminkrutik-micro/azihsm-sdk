@@ -38,7 +38,6 @@ use azihsm_fw_hsm_pal_traits::HsmPal;
 use azihsm_fw_hsm_pal_traits::HsmPartId;
 use azihsm_fw_hsm_pal_traits::HsmResult;
 use azihsm_fw_static_init::static_init;
-use azihsm_fw_uno_debug_log::DebugLogSender;
 use azihsm_fw_uno_drivers_aes::AesDriver;
 use azihsm_fw_uno_drivers_boot_status as boot_status;
 use azihsm_fw_uno_drivers_boot_status::BootStatus;
@@ -856,10 +855,9 @@ impl HsmPal for UnoHsmPal {
     /// Initialises the Uno platform (phase 1 only).
     ///
     /// Sets up the minimum needed for IPC communication:
-    /// 1. Debug log ring — first, so later steps can log
-    /// 2. SysTick (Embassy time driver) — needed for async timers
-    /// 3. RNG calibration — settling delay for IPC
-    /// 4. IPC init + enable — Admin communication channel
+    /// 1. SysTick (Embassy time driver) — needed for async timers
+    /// 2. RNG calibration — settling delay for IPC
+    /// 3. IPC init + enable — Admin communication channel
     ///
     /// IO hardware (IIC/OIC/GDMA) is deferred until the boot handshake
     /// completes (PAL transitions to [`BootPhase::Running`]).
@@ -871,16 +869,10 @@ impl HsmPal for UnoHsmPal {
     /// Returns `()`.
     ///
     /// # Side Effects
-    /// - Initializes the GSRAM debug log ring.
     /// - Initializes SysTick timing and RNG.
     /// - Initializes IPC and enables message/event channels.
     /// - Publishes boot status `Done` for host-side polling.
     fn init(&self) {
-        // First, so every later init step can log. The ring lives in
-        // GSRAM and the SP drains it, making this the only logging path
-        // observable on a blade.
-        DebugLogSender::init();
-
         systick_driver::init();
         self.rng.init();
         self.ipc.init();
